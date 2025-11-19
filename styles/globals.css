@@ -1,0 +1,66 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* ... (Omitted: @custom-variant dark and :root / .dark blocks for brevity, keep your existing code here) ... */
+
+/* Add a global focus variable for consistency */
+:root {
+  /* ... existing variables ... */
+  --sidebar-ring: oklch(0.708 0 0);
+  --focus: oklch(0.5 0.1 270); /* ADD: A distinct focus color (e.g., a bright blue/purple for better visibility) */
+}
+
+.dark {
+  /* ... existing dark variables ... */
+  --sidebar-ring: oklch(0.439 0 0);
+  --focus: oklch(0.7 0.1 270); /* ADD: A distinct focus color for dark mode */
+}
+
+@theme inline {
+  /* ... existing variables ... */
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-focus: var(--focus); /* MAP the new focus variable */
+}
+
+@layer base {
+  /* GLOBAL STYLING ENHANCEMENTS */
+  html {
+    scroll-behavior: smooth; /* Makes anchor links jump smoothly */
+  }
+
+  * {
+    /* Use the new border color and map the outline to the focus variable */
+    @apply border-border;
+    outline-color: var(--focus);
+    outline-offset: 2px; /* Pulls the outline slightly away from the element */
+    -webkit-tap-highlight-color: transparent; /* Removes default mobile tap highlight */
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    /* Professional text rendering settings */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+  }
+  
+  /* Attractive text selection color */
+  ::selection {
+    @apply bg-primary/20 text-foreground;
+  }
+  
+  /* Custom Scrollbars for a clean, non-obtrusive look */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-muted/60 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/80;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-background;
+  }
+}

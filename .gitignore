@@ -1,0 +1,11 @@
+# Dependencies
+/node_modules
+/dist
+.env
+
+# Cache and Config files
+.vite
+.DS_Store
+.eslintcache
+/storybook-static
+.storybook/
