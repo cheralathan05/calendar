@@ -1,6 +1,30 @@
 import { PrismaClient } from '@prisma/client';
 
-const prisma = new PrismaClient();
+function resolveDatabaseUrl(): string | undefined {
+  const dbUrl = process.env.DATABASE_URL;
+  const directUrl = process.env.DIRECT_URL;
+
+  const isLocalhost = (url?: string) =>
+    Boolean(url && (url.includes('localhost') || url.includes('127.0.0.1')));
+  const isRemote = (url?: string) => Boolean(url && !isLocalhost(url));
+
+  if (isLocalhost(dbUrl) && isRemote(directUrl)) {
+    return directUrl;
+  }
+  return dbUrl || directUrl;
+}
+
+const resolvedUrl = resolveDatabaseUrl();
+const prisma = new PrismaClient(
+  resolvedUrl
+    ? {
+        datasources: {
+          db: { url: resolvedUrl },
+        },
+      }
+    : undefined,
+);
+
 
 async function seedUser(email: string, name: string) {
   const user = await prisma.user.upsert({

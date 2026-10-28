@@ -46,6 +46,26 @@ function runProcess(command, args, cwd) {
   });
 }
 
+function sanitizeDatabaseUrls() {
+  const isLocalhost = (url) =>
+    Boolean(url && (url.includes('localhost') || url.includes('127.0.0.1')));
+  const isRemote = (url) => Boolean(url && !isLocalhost(url));
+
+  if (isLocalhost(process.env.DATABASE_URL) && isRemote(process.env.DIRECT_URL)) {
+    console.warn('[start-render] ⚠️ DATABASE_URL was set to localhost, but DIRECT_URL points to a remote database.');
+    console.warn('[start-render] 🔄 Auto-correcting DATABASE_URL to DIRECT_URL for production execution.');
+    process.env.DATABASE_URL = process.env.DIRECT_URL;
+  } else if (!process.env.DATABASE_URL && isRemote(process.env.DIRECT_URL)) {
+    console.log('[start-render] ℹ️ DATABASE_URL was empty; populating from DIRECT_URL.');
+    process.env.DATABASE_URL = process.env.DIRECT_URL;
+  }
+
+  if (process.env.NODE_ENV === 'production' && isLocalhost(process.env.DATABASE_URL)) {
+    console.error('[start-render] ❌ WARNING: DATABASE_URL is pointing to localhost in production on Render.');
+    console.error('[start-render] ❌ Please verify DATABASE_URL in the Render Dashboard environment settings.');
+  }
+}
+
 async function runDatabaseMigrations() {
   if (!process.env.DATABASE_URL) {
     console.warn('[start-render] ⚠️ DATABASE_URL is not defined. Skipping migrations.');
@@ -88,12 +108,16 @@ async function seedDatabase() {
 
   console.log('[start-render] 🌱 Seeding demo users and calendars...');
   try {
-    await runProcess(
+    const success = await runProcess(
       'pnpm',
       ['--filter', 'api', 'exec', 'ts-node', 'prisma/seed.ts'],
       rootDir
     );
-    console.log('[start-render] ✅ Seed script completed.');
+    if (success) {
+      console.log('[start-render] ✅ Seed script completed successfully.');
+    } else {
+      console.warn('[start-render] ⚠️ Seed script finished with non-zero exit code.');
+    }
   } catch (err) {
     console.warn('[start-render] ⚠️ Seed notice:', err.message);
   }
@@ -127,6 +151,8 @@ async function main() {
   console.log('🚀 CALENDAR-API RENDER PRODUCTION STARTUP');
   console.log('================================================================');
 
+  sanitizeDatabaseUrls();
+
   const dbOk = await runDatabaseMigrations();
   if (!dbOk) {
     console.error('[start-render] ❌ Aborting startup: Could not establish database connection.');
@@ -141,3 +167,4 @@ main().catch((err) => {
   console.error('[start-render] Fatal error during startup:', err);
   process.exit(1);
 });
+
