@@ -46,11 +46,23 @@ async function bootstrap() {
 
   app.setGlobalPrefix('v1');
 
-  // Support root /health in addition to /v1/health for cloud load balancers and Render health checks
+  // Root route providing service information
   const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.get('/', (_req: unknown, res: { json: (data: unknown) => void }) => {
+    res.json({
+      name: 'Calendar Clone API',
+      status: 'online',
+      message: 'Calendar Backend REST API is running.',
+      health: '/v1/health',
+      docs: '/v1/docs',
+    });
+  });
+
+  // Support root /health in addition to /v1/health for cloud load balancers and Render health checks
   expressApp.get('/health', (_req: unknown, res: { json: (data: unknown) => void }) => {
     res.json({ ok: true });
   });
+
 
   app.use(cookieParser());
   const rawOrigins = process.env.WEB_ORIGIN ?? 'http://localhost:3004';
