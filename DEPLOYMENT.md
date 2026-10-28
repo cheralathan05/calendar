@@ -97,7 +97,7 @@ If you prefer to configure each service manually in the Render dashboard, follow
    - **Root Directory:** `.` *(leave blank or set to repository root)*
    - **Build Command:**
      ```bash
-     corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter api run build
+     pnpm install --frozen-lockfile && pnpm --filter api run build
      ```
    - **Start Command:**
      ```bash
@@ -139,7 +139,7 @@ If you prefer to configure each service manually in the Render dashboard, follow
    - **Root Directory:** `.`
    - **Build Command:**
      ```bash
-     corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter web run build
+     pnpm install --frozen-lockfile && pnpm --filter web run build
      ```
    - **Start Command:**
      ```bash

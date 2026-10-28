@@ -17,7 +17,7 @@ services:
     region: oregon
     healthCheckPath: /v1/health
     # Running from root ensures pnpm workspace resolution across packages
-    buildCommand: corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter api run build
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter api run build
     # Prisma migrations run with automatic retries inside resilient start:render script
     startCommand: pnpm --filter api run start:render
     envVars:
@@ -64,7 +64,7 @@ services:
     plan: free
     region: oregon
     healthCheckPath: /login
-    buildCommand: corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter web run build
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter web run build
     startCommand: pnpm --filter web run start
     envVars:
       - key: NODE_VERSION
