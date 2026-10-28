@@ -1,0 +1,21 @@
+{
+  "name": "calendar-clone",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "start": "pnpm -r --parallel start",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "format": "prettier . --write",
+    "format:write": "prettier . --write",
+    "format:check": "prettier . --check",
+    "test:e2e": "node verify-monolithic-e2e.mjs"
+  },
+  "devDependencies": {
+    "prettier": "^3.7.4",
+    "prettier-plugin-tailwindcss": "^0.7.2",
+    "turbo": "^2.7.2",
+    "next": "16.2.9"
+  }
+}

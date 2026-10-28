@@ -1,0 +1,136 @@
+# Continuous Integration — runs on every PR and on pushes to main.
+# Status checks gate merges (configured in branch protection separately).
+#
+# Strategy:
+#   - Single 'ci' job, parallelised internally via Turborepo.
+#   - Cache pnpm store + Turbo's own cache so re-runs after small diffs
+#     finish in 30-60s (vs ~3 min cold).
+#   - Postgres service for API e2e tests (matches local dev setup).
+
+name: CI
+
+# Force JavaScript actions to run on Node 24 now to avoid deprecation warnings
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel earlier runs on the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: calendar_clone_test
+        ports:
+          - 5432:5432
+        # Wait for the DB to accept connections before tests run
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # API test DB — matches the .env.test.example shape.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/calendar_clone_test?schema=public
+      # prisma.schema requires DIRECT_URL (directUrl = env("DIRECT_URL")).
+      # `env` context is NOT available inside a job-level `env` block, so the
+      # value cannot reference DATABASE_URL — it must be an explicit literal.
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/calendar_clone_test?schema=public
+      JWT_SECRET: test-secret-for-ci-do-not-use-in-prod
+      COOKIE_NAME: access_token
+      # Turbo telemetry off in CI — privacy + faster startup
+      TURBO_TELEMETRY_DISABLED: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - name: Ensure pnpm available (verify + corepack fallback)
+        run: |
+          set -e
+          if command -v pnpm >/dev/null 2>&1; then
+            echo "pnpm already available: $(pnpm -v)"
+          else
+            echo "pnpm not found; trying corepack fallback..."
+            corepack enable || true
+            corepack prepare pnpm@10.17.1 --activate || true
+            if command -v pnpm >/dev/null 2>&1; then
+              echo "pnpm now available: $(pnpm -v)"
+            else
+              echo "ERROR: pnpm still not found after fallback" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: ${{ runner.os }}-turbo-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-
+
+      - name: Prisma generate
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: pnpm -C apps/api exec prisma generate
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck (web)
+        run: pnpm -C apps/web typecheck
+
+      - name: Typecheck (api)
+        run: pnpm -C apps/api typecheck
+
+      - name: Unit tests (web)
+        run: pnpm -C apps/web test
+
+      - name: Prisma migrate (test DB)
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+        run: pnpm -C apps/api exec prisma migrate deploy
+
+      - name: Unit tests (api)
+        run: pnpm -C apps/api test
+
+      - name: E2E tests (api)
+        run: pnpm -C apps/api test:e2e
+
+      - name: Build (web)
+        run: pnpm -C apps/web build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+
+      - name: Build (api)
+        run: pnpm -C apps/api build

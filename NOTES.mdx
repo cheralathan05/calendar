@@ -1,0 +1,634 @@
+# 📅 Calendar Clone — Project Notes
+
+> **Date:** April 12, 2026
+> **Goal:** Build a Google Calendar clone to portfolio-level quality, targeting FAANG-calibre engineering standards.
+
+---
+
+## 🗂️ What Is This Project?
+
+A **full-stack Google Calendar clone** built as a TypeScript monorepo. It replicates the core features of Google Calendar — multiple views, recurring events, calendar management, event search, dark mode, ICS import/export — with a clean production-ready architecture.
+
+---
+
+## 🏗️ Architecture Overview
+
+```
+calendar-clone/
+├── apps/
+│   ├── web/        ← Next.js 16 frontend (React 19, Tailwind CSS v4)
+│   └── api/        ← NestJS 11 backend (Prisma, PostgreSQL)
+├── package.json    ← Root monorepo config
+├── pnpm-workspace.yaml
+├── turbo.json
+└── docker-compose.yml / docker-compose.prod.yml
+```
+
+### Why a monorepo?
+
+- **Single repo, two apps** — frontend and backend live together, making it easy to share types and run both with one command (`pnpm dev`)
+- **Turborepo** handles the build pipeline — it caches builds, runs tasks in the right order (build API before web if needed), and supports `--parallel` dev
+- **pnpm workspaces** manages dependencies across packages efficiently with hard links (no duplicate `node_modules`)
+
+---
+
+## ⚙️ Tech Stack
+
+| Layer | Technology | Version | Why |
+|---|---|---|---|
+| Frontend | Next.js (App Router) | 16.1.1 | File-based routing, RSC, image optimisation, SEO metadata |
+| UI Library | React | 19.2.3 | Latest concurrent features, `use client`/`use server` model |
+| Styling | Tailwind CSS | v4 | Utility-first, dark mode via class strategy, zero CSS files needed |
+| Icons | Lucide React | 0.562.0 | Consistent, tree-shakeable SVG icon set |
+| Date utils | date-fns | 4.1.0 | Immutable, modular, no Moment.js bloat |
+| Recurrence | rrule | 2.8.1 | RFC 5545-compliant RRULE parsing and generation |
+| Backend | NestJS | 11 | Decorators, DI container, modular architecture — feels like Spring/Angular for Node |
+| ORM | Prisma | 6 | Type-safe DB client, auto-generated from schema, great migration tooling |
+| Database | PostgreSQL | 16 | ACID, JSON columns, `@db.Date` for all-day events |
+| Auth | Google OAuth 2.0 + JWT | — | No password management; HttpOnly cookie = XSS-safe |
+| Monorepo | Turborepo + pnpm | turbo 2.7, pnpm 10.17 | Caching, parallel tasks, workspace protocol |
+| Security | helmet + @nestjs/throttler | helmet 8, throttler 6 | HTTP headers hardening, rate limiting |
+| API Docs | @nestjs/swagger | 11 | Auto-generated OpenAPI from decorators |
+| Deployment | Docker + docker-compose | — | Reproducible builds, multi-stage for minimal image size |
+
+---
+
+## 🗄️ Database Schema
+
+Four models, designed to match Google Calendar's data model exactly.
+
+### `User`
+```prisma
+model User {
+  id        String     @id @default(cuid())
+  email     String     @unique
+  googleSub String?    @unique   // Google's "sub" claim — stable user identifier
+  name      String?
+  calendars Calendar[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+```
+
+**Why `cuid()` not `uuid()`?** CUIDs are URL-safe, shorter, and collision-resistant without a UUID generator.
+**Why `googleSub`?** Google's `sub` claim is the only truly stable identifier — email can change.
+
+---
+
+### `Calendar`
+```prisma
+model Calendar {
+  id      String  @id @default(cuid())
+  name    String
+  color   String?       // hex color, e.g. "#039BE5"
+  ownerId String
+  owner   User    @relation(...)
+  events  Event[]
+
+  @@index([ownerId])    // fast lookup of all calendars for a user
+}
+```
+
+**Why a separate Calendar model?** Mirrors Google Calendar — one user can have multiple calendars (Personal, Work, Birthdays…), and events belong to a specific calendar.
+
+---
+
+### `Event`
+```prisma
+model Event {
+  id          String   @id @default(cuid())
+  calendarId  String
+  title       String
+  description String?
+  location    String?
+
+  allDay      Boolean  @default(false)
+
+  // Timed events (stored as UTC)
+  startAt     DateTime
+  endAt       DateTime
+
+  // All-day events (stored as DATE, not TIMESTAMP)
+  startDate   DateTime? @db.Date
+  endDate     DateTime? @db.Date   // exclusive end (Google Calendar convention)
+
+  timeZone    String?
+
+  color              String?
+  recurrenceRule     String?   // RRULE string, e.g. "FREQ=WEEKLY;BYDAY=MO"
+  recurrenceTimeZone String?
+  guests             Json?
+  notifications      Json?
+  visibility         String?   // "public" | "private" | "default"
+  busyStatus         String?   // "busy" | "free"
+
+  @@index([calendarId, startAt])
+  @@index([calendarId, startDate])
+}
+```
+
+**Key design decisions:**
+
+- `startAt`/`endAt` are always stored in **UTC** — the `timeZone` field tells you what timezone to *display* them in
+- All-day events use `@db.Date` columns (PostgreSQL `DATE` type) — no time component, no timezone confusion
+- `endDate` is **exclusive** — same convention as Google Calendar (an event "Jan 1–2" has `endDate = Jan 3`)
+- `recurrenceRule` stores only the rule part (`FREQ=DAILY;COUNT=5`), not the `RRULE:` prefix
+- `guests` and `notifications` are `Json?` — flexible without extra join tables
+
+---
+
+### `EventRecurrenceException`
+```prisma
+model EventRecurrenceException {
+  id             String   @id @default(cuid())
+  eventId        String
+  originalStartAt DateTime  // identifies which occurrence this exception is for
+
+  cancelled      Boolean  @default(false)  // true = this occurrence is deleted
+
+  // All fields are nullable — null means "use the master event's value"
+  title          String?
+  description    String?
+  startAt        DateTime?
+  endAt          DateTime?
+  // ... etc
+
+  @@unique([eventId, originalStartAt])   // one exception per occurrence
+}
+```
+
+**Why this pattern?** This is how Google Calendar handles "edit this event only" — instead of creating a new event, we store a diff against the master series. The `@@unique` constraint ensures no duplicate exceptions for the same occurrence.
+
+---
+
+## 🔐 Authentication
+
+### The Full OAuth Flow
+
+```
+User → clicks "Sign in with Google"
+  → GET /v1/auth/google/start          (API redirects to Google)
+  → Google consent screen
+  → GET /v1/auth/google/callback?code= (API handles this)
+  → API verifies ID token with google-auth-library
+  → API upserts User in DB (by googleSub)
+  → API signs JWT, sets HttpOnly cookie
+  → API redirects back to web app (http://localhost:3000)
+  → Web app reads /v1/auth/me to get user info
+```
+
+### Why HttpOnly cookies instead of localStorage?
+
+| | HttpOnly Cookie | localStorage |
+|---|---|---|
+| XSS-safe | ✅ JS can't read it | ❌ Any script can steal it |
+| CSRF risk | Mitigated with `sameSite: lax` | No CSRF risk |
+| Auto-sent | ✅ Browser sends automatically | ❌ Must set Authorization header |
+
+### Why the API owns the OAuth flow?
+
+The frontend **never sees the access token or ID token** — it only receives a signed JWT inside an HttpOnly cookie. This means even if someone runs malicious JS in the browser, they cannot steal the Google credentials.
+
+### `JwtCookieGuard`
+
+A custom NestJS guard that:
+1. Reads `req.cookies[COOKIE_NAME]`
+2. Verifies the JWT with `jsonwebtoken`
+3. Attaches `req.user = { sub, email, name }` for controllers to use
+
+Applied at controller class level so it's impossible to forget on a new route.
+
+---
+
+## 🌐 Frontend Architecture
+
+### App Router Pages
+
+```
+app/
+├── page.tsx              ← Main calendar (redirects to login if not authed)
+├── login/page.tsx        ← Google sign-in button
+└── events/
+    ├── new/page.tsx      ← Fullscreen event creation form
+    └── edit/[id]/page.tsx ← Fullscreen event edit form
+```
+
+### Component Hierarchy
+
+```
+CalendarPageClient (orchestrator)
+├── useCalendarNavigation()    ← view + date in URL search params
+├── useCalendarsApi()          ← calendars list + visibility
+├── useEventsApi()             ← events CRUD
+├── useKeyboardShortcuts()     ← global keyboard navigation
+├── CalendarShell
+│   ├── CalendarHeader
+│   │   ├── SearchBar          ← debounced search with dropdown
+│   │   └── ViewSwitcher       ← pill tab bar (Year/Month/Week/Day)
+│   ├── Sidebar
+│   │   ├── MiniCalendar       ← date picker
+│   │   ├── Calendar list      ← visibility toggles
+│   │   ├── CalendarContextMenu ← rename/delete per calendar
+│   │   ├── NewCalendarModal
+│   │   └── RenameCalendarModal
+│   └── [View] (MonthView / WeekView / DayView / YearView)
+├── CreateEventModal
+├── EventPopover
+└── DayEventsPopover
+```
+
+### Why `CalendarPageClient` is just an orchestrator
+
+The principle of **"thin components, fat hooks"**. The page component only:
+1. Calls domain hooks
+2. Wires events together (e.g. unauthorized → redirect)
+3. Renders the shell
+
+No business logic lives in the component itself. This makes it easy to test hooks independently and swap out UI without touching logic.
+
+---
+
+## 🪝 Custom Hooks
+
+### `useCalendarNavigation`
+**Where:** `lib/hooks/useCalendarNavigation.ts`
+
+Syncs `view` (year/month/week/day) and `date` to **URL search params**. This means:
+- The calendar is **deep-linkable** — you can share a URL and someone lands on the same view and date
+- The **back button works** — browser history tracks view changes
+- **No React state** for navigation — the URL is the state
+
+### `useEventsApi`
+**Where:** `lib/events/useEventsApi.ts`
+
+Owns the full events data lifecycle:
+- Fetches events for the current date range
+- Provides `addEvent`, `updateEvent`, `removeEvent`
+- Handles 401 → sets `unauthorized = true` (parent redirects to login)
+- All mutations `await refresh()` after API calls
+
+**Why not React Query / SWR?** Kept dependencies minimal for a portfolio project. The hook is a clean implementation of the same pattern.
+
+### `useCalendarsApi`
+**Where:** `lib/calendars/useCalendarsApi.ts`
+
+Single source of truth for calendars. Manages:
+- `calendars[]` — the list from API
+- `visibleCalendarIds` — which ones are checked
+- `toggleCalendar`, `createCalendar`, `updateCalendar`, `deleteCalendar`
+
+**Why hoisted to `CalendarPageClient`?** Previously `Sidebar.tsx` fetched calendars internally. This meant the data wasn't available anywhere else. Hoisting it means:
+- Event forms can show a calendar selector
+- The events list can be filtered by visibility
+- Single API call instead of duplicate fetches
+
+### `useKeyboardShortcuts`
+**Where:** `lib/hooks/useKeyboardShortcuts.ts`
+
+Global `keydown` listener. Skips when focus is in an input/textarea/select. Implements Google Calendar's exact shortcuts:
+
+| Key | Action |
+|---|---|
+| `t` | Today |
+| `d` | Day view |
+| `w` | Week view |
+| `m` | Month view |
+| `y` | Year view |
+| `c` | Create event |
+| `←` `p` `k` | Previous period |
+| `→` `n` `j` | Next period |
+
+### `usePopoverState`
+**Where:** `lib/hooks/usePopoverState.ts`
+
+Manages both the event detail popover and the "more events" day popover state — open/closed, anchor rect for positioning, which event is active.
+
+---
+
+## 📅 Calendar Views
+
+### MonthView
+Classic Google Calendar month grid. Each week row shows events in the cells. "All-day" and multi-day events get colored bars. A "+N more" button opens `DayEventsPopover`.
+
+### WeekView
+7-column timeline with:
+- **All-day row** at top for all-day and multi-day events
+- **Timed events** positioned absolutely using pixel-per-minute math
+- **Overlap layout** algorithm — events in the same time slot split the column width
+- **Now indicator** — red line at current time (only shown if today is visible)
+- Click on a time slot → opens `CreateEventModal` with that time pre-filled
+
+### DayView
+Single-column version of WeekView. Same timeline math.
+
+### YearView
+12 mini month grids. Clicking a month navigates to MonthView.
+
+---
+
+## 🔁 Recurring Events
+
+This is the most complex part of the backend.
+
+### How it works
+
+1. A recurring event is stored as **one row** in the `Event` table with a `recurrenceRule` (e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`)
+2. When you query `GET /v1/events?from=&to=`, the backend **expands** the rule using the `rrule` library to generate all occurrences in the date range
+3. Each virtual occurrence gets a virtual ID: `{masterId}@{originalStartAt}` — e.g. `clx123@2026-04-14T09:00:00.000Z`
+4. Exceptions (edited/deleted occurrences) are stored in `EventRecurrenceException` and applied on top
+
+### Edit scope options
+
+When you edit a recurring event, you choose:
+- **This event** — creates an exception row for just this occurrence
+- **This and following events** — splits the series (sets an `UNTIL` on the original rule, creates a new series from this point)
+- **All events** — updates the master event row
+
+### Why RRULE?
+
+RFC 5545 (iCalendar standard) is the universal format for recurring events. Google Calendar uses it. Using the same standard means ICS import/export works correctly.
+
+---
+
+## 🔍 Event Search
+
+**Frontend:** `SearchBar` component in `CalendarHeader`
+- 300ms debounce — doesn't hit the API on every keystroke
+- Dropdown shows event title, color dot, and formatted date
+- Clicking a result opens the `EventPopover` directly
+
+**Backend:** `GET /v1/events/search?q=`
+- Case-insensitive `contains` query (maps to `ILIKE` in PostgreSQL) on `title`, `description`, and `location`
+- Returns up to 20 results ordered by most recent
+- **Critically placed before `GET /v1/events/:id`** in the controller — otherwise Express would treat the literal string `"search"` as an `:id` parameter
+
+---
+
+## 🗓️ Calendar Management (Sidebar)
+
+Previously the sidebar just fetched calendars for display. Now it has full CRUD:
+
+- **Visibility toggle** — checkbox-style colored swatch. Unchecking a calendar hides its events live (filtered in `CalendarPageClient` via `useMemo`)
+- **"…" context menu** — appears on hover, has Rename and Delete actions
+- **Rename/Recolor modal** — edit name + pick from 8 preset colors
+- **New calendar modal** — create with name + color picker
+- **Delete** — confirms with a dialog (destructive, cascades to all events)
+
+---
+
+## 🔔 Toast Notifications
+
+**File:** `components/ui/Toast.tsx`
+
+A lightweight in-house toast system (no external library):
+- `ToastProvider` wraps the entire app in `layout.tsx`
+- `useToast()` hook gives access to `showToast(message, type)`
+- Three types: `success` (green), `error` (red), `info` (blue)
+- Auto-dismisses after 4 seconds
+- Stacks in the bottom-right corner
+
+**Why not use a library like `react-hot-toast`?** Keeping it custom demonstrates you understand React Context and the pattern, which is more impressive to interviewers than importing a package.
+
+---
+
+## 📝 Custom Recurrence Builder
+
+**File:** `components/calendar/events/CustomRecurrenceDialog.tsx`
+
+Previously "Custom…" showed "coming soon". Now it opens a dialog with:
+- **Repeat every N [days/weeks/months/years]**
+- **Day-of-week pills** (shown only for weekly frequency) — click to toggle Mon/Tue/etc
+- **Ends:** Never / On a date / After N occurrences
+- **Live summary** — shows a human-readable description as you configure (e.g. "Every 2 weeks, on Mon, Wed, until Dec 31, 2026")
+- Produces a valid RRULE string using the `rrule` library
+
+---
+
+## 🎨 UI Polish
+
+### ViewSwitcher
+Replaced a plain HTML `<select>` with a Google-style **pill tab bar**:
+- Rounded container with background
+- Active tab: white background + shadow
+- Accessible: `role="tab"`, `aria-selected`
+
+### Event Page Shell
+Previously `/events/new` and `/events/edit/[id]` were just a bare `<div className="p-6">`. Now they use `EventPageShell`:
+- Top bar with back arrow (←), calendar logo, and title ("New event" / "Edit event")
+- Consistent with the main calendar header style
+- Loading state uses the shell too (spinner inside the header)
+
+### Dark Mode
+Implemented with Tailwind's `dark:` class strategy:
+- A `<script>` in `<head>` runs before first paint — reads `localStorage` and adds `class="dark"` to `<html>` immediately, preventing flash of wrong theme
+- `useTheme()` hook syncs React state to the same localStorage key
+- Three modes: Light, Dark, System (follows OS preference)
+
+---
+
+## 🛡️ Security
+
+### `helmet`
+Added to `main.ts`. Automatically sets ~12 HTTP security headers:
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Strict-Transport-Security` (HSTS)
+- `Content-Security-Policy`
+- …and more
+
+In development, CSP is disabled so Swagger UI can load inline scripts.
+
+### Rate Limiting (`@nestjs/throttler`)
+120 requests per minute per IP, applied globally via `APP_GUARD`. Prevents:
+- Brute-force attempts
+- API abuse / scraping
+- Accidental infinite request loops from bugs
+
+### Production-safe cookies
+```typescript
+// Before (wrong):
+secure: false // hardcoded!
+
+// After (correct):
+secure: process.env.NODE_ENV === 'production'
+```
+
+In production (HTTPS), the cookie is only sent over encrypted connections.
+
+---
+
+## 📚 API Documentation (Swagger)
+
+Added `@nestjs/swagger` with a `DocumentBuilder`. Available at:
+```
+http://localhost:3001/v1/docs
+```
+
+Only enabled when `NODE_ENV !== 'production'`. Shows all endpoints, request/response shapes, and supports cookie authentication for testing.
+
+---
+
+## 🐳 Docker & Deployment
+
+### Multi-stage Dockerfiles
+
+Both apps use **multi-stage builds** — a software engineering best practice for production containers:
+
+1. **Stage 1 (deps/builder):** Install all dependencies, compile TypeScript/Next.js
+2. **Stage 2 (runner):** Copy only the compiled output + production `node_modules` — the final image is much smaller (no TypeScript compiler, no dev dependencies)
+
+### Next.js Standalone Output
+
+```typescript
+// next.config.ts
+output: 'standalone'
+```
+
+This makes Next.js produce a self-contained `server.js` + only the required `node_modules`. The Docker image goes from ~1GB to ~200MB.
+
+### `docker-compose.prod.yml`
+
+Orchestrates three services:
+- `db` — PostgreSQL 16 with health check
+- `api` — NestJS backend (waits for DB to be healthy before starting)
+- `web` — Next.js frontend (waits for API)
+
+All configuration via environment variables — no secrets in the image.
+
+---
+
+## 📁 Key Files Reference
+
+### Frontend
+
+| File | Purpose |
+|---|---|
+| `app/layout.tsx` | Root layout — fonts, dark mode script, `ToastProvider` |
+| `app/page.tsx` | Home page — renders `CalendarPageClient` |
+| `components/calendar/CalendarPageClient.tsx` | Main orchestrator — composes all hooks |
+| `components/calendar/CalendarShell.tsx` | Layout: header + sidebar + view |
+| `components/calendar/Sidebar.tsx` | Mini calendar + calendar list + management modals |
+| `components/calendar/CalendarHeader.tsx` | Top bar: nav, search, view switcher, settings, user |
+| `components/calendar/ViewSwitcher.tsx` | Pill tab bar (Year/Month/Week/Day) |
+| `components/calendar/views/WeekView.tsx` | 7-column timeline with overlap layout |
+| `components/calendar/events/EventPageShell.tsx` | Shell for fullscreen event editor pages |
+| `components/calendar/events/CustomRecurrenceDialog.tsx` | Custom RRULE builder dialog |
+| `components/calendar/events/RecurrencePicker.tsx` | Recurrence preset selector |
+| `components/ui/Toast.tsx` | Toast notification system |
+| `lib/calendars/useCalendarsApi.ts` | Hook: calendars data + visibility + CRUD |
+| `lib/events/useEventsApi.ts` | Hook: events data + CRUD |
+| `lib/hooks/useCalendarNavigation.ts` | Hook: URL-driven view/date state |
+| `lib/hooks/useKeyboardShortcuts.ts` | Hook: global keyboard shortcuts |
+| `lib/api/client.ts` | `apiFetch` wrapper — throws `ApiError` on non-2xx |
+| `lib/api/events.ts` | API calls + `apiEventToCalendarEvent` mapper |
+| `types/global.d.ts` | Shared types: `CalendarEvent`, `CalendarView`, etc. |
+
+### Backend
+
+| File | Purpose |
+|---|---|
+| `src/main.ts` | Bootstrap: helmet, validation pipe, CORS, Swagger, rate limiting |
+| `src/app.module.ts` | Root module: imports ThrottlerModule, all feature modules |
+| `src/auth/auth.controller.ts` | OAuth start/callback/logout/me endpoints |
+| `src/auth/auth.service.ts` | Google token exchange, JWT signing, user upsert |
+| `src/auth/jwt-cookie.guard.ts` | Validates JWT cookie on every protected request |
+| `src/calendars/calendars.controller.ts` | Calendars CRUD endpoints |
+| `src/calendars/calendars.service.ts` | Calendar business logic + ownership checks |
+| `src/events/events.controller.ts` | Events CRUD + search endpoints |
+| `src/events/events.service.ts` | Event logic, recurrence expansion, exception handling |
+| `prisma/schema.prisma` | DB schema: User, Calendar, Event, EventRecurrenceException |
+
+---
+
+## 🚀 Running the Project Locally
+
+### Prerequisites
+- Node.js LTS (v22+)
+- pnpm (`npm i -g pnpm`)
+- Docker (for PostgreSQL)
+
+### Steps
+
+```bash
+# 1. Install all dependencies
+pnpm install
+
+# 2. Start PostgreSQL
+docker compose up -d
+
+# 3. Copy env files and fill in values
+cp apps/api/.env.example apps/api/.env
+cp apps/web/.env.example apps/web/.env.local
+
+# 4. Run DB migrations
+pnpm -C apps/api exec prisma migrate dev
+
+# 5. Start both apps (runs in parallel via Turborepo)
+pnpm dev
+```
+
+- **Web:** http://localhost:3000
+- **API:** http://localhost:3001
+- **Swagger docs:** http://localhost:3001/v1/docs
+
+### Google OAuth Setup (required for login)
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create OAuth 2.0 credentials (Web application type)
+3. Set **Authorised redirect URI:** `http://localhost:3001/v1/auth/google/callback`
+4. Copy `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` into `apps/api/.env`
+
+---
+
+## 🧠 Key Engineering Decisions (for interviews)
+
+### 1. URL as state for navigation
+Using `useSearchParams` for view/date means the calendar is deep-linkable and the browser back button works — no extra state management needed.
+
+### 2. HttpOnly cookie auth (not localStorage)
+A conscious security decision. Eliminates the entire class of XSS token-theft attacks. The tradeoff is you need `credentials: 'include'` on every fetch and a CORS policy.
+
+### 3. `apiFetch` throws, never returns `{ok}`
+Every API call either succeeds or throws `ApiError`. Callers use `try/catch`. This is more ergonomic than checking `.ok` at every call site and forces errors to be handled.
+
+### 4. Hoisting state up
+When `visibleCalendarIds` lived inside `Sidebar`, it was trapped — the events list couldn't see it. Hoisting it to `CalendarPageClient` made it available everywhere. This is the fundamental React "lifting state up" principle applied to a real problem.
+
+### 5. Thin controllers, fat services (NestJS)
+Controllers are 1-2 lines each. All business logic is in services. This makes services unit-testable without spinning up HTTP, and makes the API contract clear.
+
+### 6. Multi-stage Docker builds
+Final production images don't contain TypeScript, the compiler, or dev dependencies. The API image is ~3x smaller than a naive single-stage build.
+
+### 7. Recurring events via exception model
+Instead of creating N copies of an event, we store one master + diffs. This is exactly how Google Calendar, Outlook, and iCal work. It's efficient (one row vs potentially thousands) and correct (editing "all events" just updates one row).
+
+---
+
+## 📊 Feature Completion Status
+
+| Feature | Status |
+|---|---|
+| Month / Week / Day / Year views | ✅ Done |
+| Event creation (modal + fullscreen form) | ✅ Done |
+| Event editing with fullscreen form | ✅ Done |
+| Recurring events (RRULE) | ✅ Done |
+| Custom recurrence rule builder | ✅ Done |
+| Edit scope: this / following / all | ✅ Done |
+| Calendar visibility filtering | ✅ Done |
+| Calendar management (create/rename/recolor/delete) | ✅ Done |
+| Google OAuth login | ✅ Done |
+| Dark / light / system theme | ✅ Done |
+| ICS export / import | ✅ Done |
+| Event search (full-text) | ✅ Done |
+| Keyboard shortcuts | ✅ Done |
+| Toast notifications | ✅ Done |
+| Google-style ViewSwitcher (pill tabs) | ✅ Done |
+| Event Page Shell (back navigation) | ✅ Done |
+| Security: helmet + rate limiting | ✅ Done |
+| API documentation (Swagger) | ✅ Done |
+| Production Docker setup | ✅ Done |
+| Drag-and-drop rescheduling | ⏳ Next milestone |
+| Agenda / list view (mobile) | ⏳ Next milestone |
+| Frontend unit tests (Vitest) | ⏳ Next milestone |
+| Calendar sharing / public links | ⏳ Future |

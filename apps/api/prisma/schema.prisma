@@ -1,0 +1,161 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String     @id @default(cuid())
+  email     String     @unique
+  googleSub String?    @unique
+  name      String?
+  calendars Calendar[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Calendar {
+  id        String   @id @default(cuid())
+  name      String
+  color     String?
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  events    Event[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  calendarId  String
+  calendar    Calendar @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String?
+  location    String?
+
+  // google-like behavior
+  allDay      Boolean  @default(false)
+
+  // Timed events: stored as UTC instants
+  startAt     DateTime
+  endAt       DateTime
+
+  // All-day events: stored as DATEs (exclusive endDate)
+  // NOTE: use DateTime with @db.Date in Postgres
+  startDate   DateTime? @db.Date
+  endDate     DateTime? @db.Date
+
+  timeZone    String?  // tzid semantics (important for all-day & timed)
+
+  color              String?
+  recurrenceRule     String?
+  recurrenceTimeZone String?
+  guests        Json?
+  notifications Json?
+  visibility    String?
+  busyStatus    String?
+
+  // meeting support (Jitsi MVP)
+  meetingProvider String?  // e.g. 'jitsi'
+  meetingUrl      String?
+  meetingData     Json?
+
+  // recurrence exceptions (per-occurrence overrides/cancellations)
+  recurrenceExceptions EventRecurrenceException[]
+  attendees            EventAttendee[]
+  invitations          Invitation[]
+  reminderDeliveries   EventReminderDelivery[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([calendarId, startAt])
+  @@index([calendarId, startDate])
+}
+
+model EventAttendee {
+  id        String   @id @default(cuid())
+  eventId   String
+  email     String
+  name      String?
+  rsvp      String   @default("needsAction") // accepted|declined|tentative|needsAction
+  permissions Json?   // permissions/actions this attendee is allowed to perform (e.g. ["modify","seeGuests"])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  @@index([eventId])
+  @@unique([eventId, email])
+}
+
+model Invitation {
+  id           String   @id @default(cuid())
+  eventId      String
+  email        String
+  token        String   @unique
+  expiresAt    DateTime
+  sentAt       DateTime?
+  status       String   @default("sent") // sent, delivered, bounced
+  createdAt    DateTime @default(now())
+
+  event        Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  @@index([eventId])
+}
+
+model EventRecurrenceException {
+  id              String   @id @default(cuid())
+  eventId          String
+  event            Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  // identifies which occurrence of the series this exception applies to
+  originalStartAt  DateTime
+
+  // if true -> this occurrence is removed from the series
+  cancelled        Boolean  @default(false)
+
+  // optional overrides (null = no override)
+  title            String?
+  description      String?
+  location         String?
+  allDay           Boolean?
+  startAt          DateTime?
+  endAt            DateTime?
+  startDate        DateTime? @db.Date
+  endDate          DateTime? @db.Date
+  color            String?
+  timeZone         String?
+  guests           Json?
+  notifications    Json?
+  visibility       String?
+  busyStatus       String?
+
+  // meeting override support
+  meetingProvider  String?
+  meetingUrl       String?
+  meetingData      Json?
+
+  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime  @default(now())
+
+  @@unique([eventId, originalStartAt])
+  @@index([eventId, originalStartAt])
+}
+
+model EventReminderDelivery {
+  id             String   @id @default(cuid())
+  eventId        String
+  notificationId String // NotificationItem.id from Event.notifications
+  sentAt         DateTime @default(now())
+
+  event          Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, notificationId])
+  @@index([eventId])
+}

@@ -1,0 +1,84 @@
+# Render Blueprint Specification
+# Docs: https://render.com/docs/blueprint-spec
+
+databases:
+  - name: calendar-db
+    databaseName: calendar
+    user: calendar_user
+    plan: free
+    region: oregon
+
+services:
+  # ── Backend NestJS API ────────────────────────────────────────────────────────
+  - type: web
+    name: calendar-api
+    runtime: node
+    plan: free
+    region: oregon
+    healthCheckPath: /v1/health
+    # Running from root ensures pnpm workspace resolution across packages
+    buildCommand: corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter api run build
+    # Prisma migrations run with automatic retries inside resilient start:render script
+    startCommand: pnpm --filter api run start:render
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=460"
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: DATABASE_URL
+        fromDatabase:
+          name: calendar-db
+          property: connectionString
+      - key: DIRECT_URL
+        fromDatabase:
+          name: calendar-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_NAME
+        value: access_token
+      - key: ALLOW_DEMO
+        value: "true"
+      # WEB_ORIGIN: Can be set in Render dashboard or left to auto-detect from request referer
+      - key: WEB_ORIGIN
+        sync: false
+      # Optional Google OAuth:
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      # Optional Email Service:
+      - key: BREVO_API_KEY
+        sync: false
+
+  # ── Frontend Next.js Web App ──────────────────────────────────────────────────
+  - type: web
+    name: calendar-web
+    runtime: node
+    plan: free
+    region: oregon
+    healthCheckPath: /login
+    buildCommand: corepack enable && corepack prepare pnpm@10.17.1 --activate && pnpm install --frozen-lockfile && pnpm --filter web run build
+    startCommand: pnpm --filter web run start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=460"
+      - key: NODE_ENV
+        value: production
+      # Internal API URL routes Next.js server proxy rewrites over Render's private network
+      - key: INTERNAL_API_URL
+        fromService:
+          name: calendar-api
+          type: web
+          property: hostport
+      # Public API URL for client-side navigation (Google OAuth & Demo logins)
+      - key: NEXT_PUBLIC_API_URL
+        sync: false

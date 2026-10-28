@@ -1,0 +1,55 @@
+# Dependabot — weekly minor + patch updates, grouped to reduce PR noise.
+# Major version bumps still arrive as individual PRs so they can be reviewed
+# carefully (often breaking changes).
+
+version: 2
+updates:
+  # npm — monorepo root + both apps via the workspace
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Jakarta
+    open-pull-requests-limit: 5
+    labels: [dependencies, javascript]
+    groups:
+      # Group test-only deps together to keep app surface tidy
+      test-tooling:
+        patterns:
+          - '@testing-library/*'
+          - '@vitest/*'
+          - 'vitest'
+          - 'jsdom'
+          - 'supertest'
+          - '@types/supertest'
+          - 'jest'
+          - 'ts-jest'
+          - '@types/jest'
+        update-types: [minor, patch]
+      # NestJS releases minor versions together — group them
+      nestjs:
+        patterns: ['@nestjs/*']
+        update-types: [minor, patch]
+      # Same for type packages
+      types:
+        patterns: ['@types/*']
+        update-types: [minor, patch]
+      # Misc minor/patch updates rolled into one weekly PR
+      minor-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+    ignore:
+      # Pin React across the monorepo — bumping React major is project-wide
+      - dependency-name: react
+        update-types: [version-update:semver-major]
+      - dependency-name: react-dom
+        update-types: [version-update:semver-major]
+
+  # GitHub Actions — keep workflow actions current (security patches)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, github-actions]

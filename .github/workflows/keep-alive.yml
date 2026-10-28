@@ -1,0 +1,33 @@
+name: Keep Alive
+
+# Pings the Render API health endpoint every 14 minutes to prevent the
+# free-tier service from spinning down (Render spins down after 15 min
+# of inactivity). This keeps response time instant for portfolio visitors.
+#
+# Required GitHub secret:  RENDER_API_URL
+#   Value: your Render service URL, e.g. https://calendar-clone-api.onrender.com
+#   Set at: github.com/<user>/<repo> → Settings → Secrets → Actions → New
+
+on:
+  schedule:
+    # Every 14 minutes (cron minimum is 5 min; 14 keeps well within the 15-min window)
+    - cron: '*/14 * * * *'
+  workflow_dispatch: # allow manual trigger for testing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping health endpoint
+        run: |
+          echo "Pinging ${{ secrets.RENDER_API_URL }}/v1/db-health"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 150 \
+            "${{ secrets.RENDER_API_URL }}/v1/db-health")
+          echo "Response status: $STATUS"
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Health check failed with status $STATUS"
+            exit 1
+          fi
+          echo "Service is up"
