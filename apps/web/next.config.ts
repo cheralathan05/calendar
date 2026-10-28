@@ -42,8 +42,13 @@ const nextConfig: NextConfig = {
         source: '/v1/:path*',
         destination: `${apiUrl}/v1/:path*`,
       },
+      {
+        source: '/health',
+        destination: `${apiUrl}/health`,
+      },
     ];
   },
 };
+
 
 export default nextConfig;

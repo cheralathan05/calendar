@@ -13,6 +13,8 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -123,32 +125,90 @@ async function seedDatabase() {
   }
 }
 
-function startServer() {
-  console.log('[start-render] 🚀 Starting NestJS API in production mode...');
-  const child = spawn('node', ['dist/src/main.js'], {
+async function ensureFrontendBuilt() {
+  const webDir = path.resolve(rootDir, 'apps', 'web');
+  const nextBuildDir = path.join(webDir, '.next');
+  if (!fs.existsSync(nextBuildDir)) {
+    console.log('[start-render] 📦 Building Next.js frontend (apps/web)...');
+    const success = await runProcess('pnpm', ['--filter', 'web', 'run', 'build'], rootDir);
+    if (!success) {
+      console.warn('[start-render] ⚠️ Next.js build completed with non-zero exit code.');
+    }
+  }
+}
+
+async function startServer() {
+  console.log('================================================================');
+  console.log('🚀 CALENDAR MONOLITHIC RUNTIME (NESTJS API + NEXT.JS FRONTEND)');
+  console.log('================================================================');
+
+  await ensureFrontendBuilt();
+
+  const publicPort = String(process.env.PORT || '3000');
+  const apiInternalPort = publicPort === '3005' ? '3006' : '3005';
+
+  console.log(`[start-render] 🔌 NestJS Internal API Port: ${apiInternalPort}`);
+  console.log(`[start-render] 🌐 Next.js Public Web Port: ${publicPort}`);
+
+  // 1. Start NestJS Backend on internal port
+  console.log(`[start-render] 🚀 Launching NestJS Backend API (internal port ${apiInternalPort})...`);
+  const apiEnv = {
+    ...process.env,
+    PORT: apiInternalPort,
+    WEB_ORIGIN: `http://localhost:${publicPort},https://*.onrender.com`,
+  };
+
+  const apiProcess = spawn('node', ['dist/src/main.js'], {
     cwd: apiDir,
     stdio: 'inherit',
-    env: process.env,
+    env: apiEnv,
+    shell: true,
+  });
+
+  // Wait for NestJS to initialize
+  await sleep(3000);
+
+  // 2. Start Next.js Frontend on Render's public PORT
+  console.log(`[start-render] 🎨 Launching Next.js Calendar Web UI (public port ${publicPort})...`);
+  const webDir = path.resolve(rootDir, 'apps', 'web');
+  const webEnv = {
+    ...process.env,
+    PORT: publicPort,
+    INTERNAL_API_URL: `http://127.0.0.1:${apiInternalPort}`,
+    NEXT_PUBLIC_API_URL: '', // relative URLs proxy through Next.js
+  };
+
+  const webProcess = spawn('npx', ['next', 'start', '-H', '0.0.0.0', '-p', publicPort], {
+    cwd: webDir,
+    stdio: 'inherit',
+    env: webEnv,
     shell: true,
   });
 
   const forwardSignal = (sig) => {
-    try {
-      child.kill(sig);
-    } catch (_) {}
+    try { apiProcess.kill(sig); } catch (_) {}
+    try { webProcess.kill(sig); } catch (_) {}
   };
 
   process.on('SIGINT', () => forwardSignal('SIGINT'));
   process.on('SIGTERM', () => forwardSignal('SIGTERM'));
 
-  child.on('close', (code) => {
+  webProcess.on('close', (code) => {
+    console.log(`[start-render] Next.js process exited with code ${code}`);
+    try { apiProcess.kill(); } catch (_) {}
+    process.exit(code ?? 0);
+  });
+
+  apiProcess.on('close', (code) => {
+    console.log(`[start-render] NestJS process exited with code ${code}`);
+    try { webProcess.kill(); } catch (_) {}
     process.exit(code ?? 0);
   });
 }
 
 async function main() {
   console.log('================================================================');
-  console.log('🚀 CALENDAR-API RENDER PRODUCTION STARTUP');
+  console.log('🚀 CALENDAR MONOLITHIC RENDER PRODUCTION STARTUP');
   console.log('================================================================');
 
   sanitizeDatabaseUrls();
@@ -160,11 +220,12 @@ async function main() {
   }
 
   await seedDatabase();
-  startServer();
+  await startServer();
 }
 
 main().catch((err) => {
   console.error('[start-render] Fatal error during startup:', err);
   process.exit(1);
 });
+
 
